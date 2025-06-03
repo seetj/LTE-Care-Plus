@@ -1,51 +1,54 @@
 import streamlit as st
-import pandas as pd
 from twilio.rest import Client
+import time
 
-# ---- Twilio Config (set your credentials here or use Streamlit Secrets) ----
-TWILIO_SID = st.secrets.get("TWILIO_SID", "")
-TWILIO_AUTH_TOKEN = st.secrets.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_PHONE_NUMBER = st.secrets.get("TWILIO_PHONE_NUMBER", "")
+# Twilio credentials from secrets
+TWILIO_SID = st.secrets["TWILIO_SID"]
+TWILIO_AUTH_TOKEN = st.secrets["TWILIO_AUTH_TOKEN"]
+TWILIO_PHONE_NUMBER = st.secrets["TWILIO_PHONE_NUMBER"]
 
-st.title("📲 Mass SMS Sender via Twilio")
+# Initialize client
+client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
-# ---- Upload CSV with phone numbers ----
-uploaded_file = st.file_uploader("Upload CSV with 'phone' column", type=['csv'])
+st.title("📲 Mass SMS Sender (Manual Entry + Delivery Tracking)")
 
-# ---- Message input ----
-message = st.text_area("Enter the message to send", height=100)
+# User inputs
+numbers_text = st.text_area("Enter phone numbers (E.164 format, one per line)", height=200)
+message = st.text_area("Enter message to send", height=150)
 
-# ---- Send button ----
+# Send button
 if st.button("Send Messages"):
-    if not all([TWILIO_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        st.error("Twilio credentials are missing. Set them in Streamlit secrets.")
-    elif uploaded_file is None:
-        st.warning("Please upload a CSV file with phone numbers.")
-    elif not message.strip():
-        st.warning("Please enter a message.")
+    if not numbers_text.strip() or not message.strip():
+        st.warning("Please enter both phone numbers and a message.")
     else:
-        df = pd.read_csv(uploaded_file)
+        phone_list = [
+            line.strip() for line in numbers_text.strip().splitlines()
+            if line.strip()
+        ]
 
-        if "phone" not in df.columns:
-            st.error("CSV must contain a 'phone' column.")
-        else:
-            client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
-            success_count = 0
-            error_count = 0
+        sent_count = 0
+        failed_numbers = []
 
-            with st.spinner("Sending messages..."):
-                for number in df["phone"]:
-                    try:
-                        client.messages.create(
-                            body=message,
-                            from_=TWILIO_PHONE_NUMBER,
-                            to=str(number)
-                        )
-                        success_count += 1
-                    except Exception as e:
-                        error_count += 1
-                        st.error(f"Failed to send to {number}: {e}")
+        with st.spinner("Sending messages and checking delivery..."):
+            for number in phone_list:
+                try:
+                    msg = client.messages.create(
+                        body=message,
+                        from_=TWILIO_PHONE_NUMBER,
+                        to=number
+                    )
+                    # Wait a moment for delivery status to update
+                    time.sleep(2)
+                    status = client.messages(msg.sid).fetch().status
+                    if status in ['delivered', 'sent', 'queued']:
+                        sent_count += 1
+                    else:
+                        failed_numbers.append((number, status))
+                except Exception as e:
+                    failed_numbers.append((number, str(e)))
 
-            st.success(f"Messages sent successfully: {success_count}")
-            if error_count:
-                st.warning(f"Failed messages: {error_count}")
+        st.success(f"✅ {sent_count} messages sent successfully.")
+        if failed_numbers:
+            st.error(f"❌ {len(failed_numbers)} messages failed.")
+            for num, reason in failed_numbers:
+                st.write(f"{num}: {reason}")
