@@ -2,6 +2,12 @@
 import streamlit as st
 import pandas as pd
 import re
+import io
+
+buffer = io.BytesIO()
+df.to_excel(buffer, index=False, engine='openpyxl')
+buffer.seek(0)
+
 
 st.title("Billing Text File Parser")
 
@@ -83,13 +89,12 @@ if uploaded_file is not None:
     st.success("File parsed successfully.")
     st.dataframe(df)
 
-    # Export to Excel
     st.download_button(
-        label="Download as Excel",
-        data=df.to_excel(index=False, engine='openpyxl'),
-        file_name="Parsed_Billing_Output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    label="Download as Excel",
+    data=buffer,
+    file_name="Parsed_Billing_Output.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
 
 
 
