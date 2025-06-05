@@ -1,58 +1,74 @@
 import streamlit as st
 import pandas as pd
 import re
-import io
 
-st.title("Billing Text File Parser")
-
-uploaded_file = st.file_uploader("Upload Billing Text File", type=["txt"])
-
-if uploaded_file is not None:
-    text = uploaded_file.read().decode("utf-8")
-    entries = text.strip().split('\n' + '-' * 100 + '\n')
+def parse_billing_text_file(text: str) -> pd.DataFrame:
+    entries = re.split(r'\n-{50,}\n', text.strip())
     records = []
 
     for entry in entries:
-        header_match = re.search(
-            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[A-Z]+,[A-Z]+)\s+'
-            r'(?P<charge_amt>\d+\.\d+)\s+(?P<payment_amt>\d+\.\d+)\s+'
-            r'(?P<accnt>P\d+)\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)\s+'
-            r'(?P<payer>NYSDOH)', entry)
+        lines = entry.strip().splitlines()
+        if lines and lines[0].strip().startswith("Check#"):
+            lines = lines[1:]
 
-        if not header_match:
+        if not lines:
             continue
 
-        header_info = header_match.groupdict()
+        # Extract check number, patient ID, and name from first line
+        first_line = lines[0].strip()
+        check_match = re.match(
+            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[\w\'\-]+,[\w\'\-]+)',
+            first_line
+        )
+        if not check_match:
+            continue
 
+        header_info = check_match.groupdict()
+        header_info["payer"] = "NYSDOH"
+
+        # Recombine and flatten the full entry for other details
+        entry = "\n".join(lines)
+        entry_flat = re.sub(r'\s+', ' ', entry)
+
+        # Extract remaining header fields
+        accnt_match = re.search(r'(P\d+)', entry_flat)
+        status_match = re.search(r'(PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)', entry_flat)
+
+        header_info["accnt"] = accnt_match.group(1) if accnt_match else ''
+        header_info["status"] = status_match.group(1) if status_match else ''
+
+        # Payer details
+        payer_details_parts = []
         payer_address_match = re.search(
             r'(OFFICE OF HEALTH INSURANCE PROGRAM).*?(CORNING TOWER, EMPIRE STATE PLAZA).*?'
             r'(ALBANY,NY \d+).*?(Tax ID: \S+)', entry, re.DOTALL)
         payer_claim_number_match = re.search(r'Payer Claim Control Number: (\d+)', entry)
-        payer_details_parts = []
 
         if payer_address_match:
             payer_details_parts.extend(payer_address_match.groups())
         if payer_claim_number_match:
             payer_details_parts.append(f'Payer Claim Control Number: {payer_claim_number_match.group(1)}')
 
-        header_info['payer_details'] = " | ".join(payer_details_parts)
+        header_info["payer_details"] = " | ".join(payer_details_parts)
 
+        # Claim statement period
         claim_period_match = re.search(
             r'Claim Statement Period:\s+(\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})', entry)
-        header_info['claim_start'] = claim_period_match.group(1) if claim_period_match else ''
-        header_info['claim_end'] = claim_period_match.group(2) if claim_period_match else ''
+        header_info["claim_start"] = claim_period_match.group(1) if claim_period_match else ''
+        header_info["claim_end"] = claim_period_match.group(2) if claim_period_match else ''
 
+        # Parse line items
         raw_lines = re.split(r'Line Item:', entry)[1:]
         for block in raw_lines:
             svc_match = re.search(
-            r'(\d{2}/\d{2}/\d{4})\s+(\d{5})\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*)',
-            block.strip())
-
+                r'(\d{2}/\d{2}/\d{4})\s+(\d{5})\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*)',
+                block.strip())
             if not svc_match:
                 continue
 
             svc_date, cpt, charge_amt, payment_amt, total_adj_amt, remarks = svc_match.groups()
 
+            # Adjustments
             adj_group = ''
             adj_amt_val = ''
             reason = ''
@@ -69,30 +85,31 @@ if uploaded_file is not None:
 
             record = header_info.copy()
             record.update({
-                'svc_date': svc_date.strip(),
-                'cpt': cpt.strip(),
-                'line_charge_amt': charge_amt.strip(),
-                'line_payment_amt': payment_amt.strip(),
-                'total_adj_amt': total_adj_amt.strip(),
-                'remarks': remarks.strip(),
-                'adj_group': adj_group,
-                'adj_group_amt': adj_amt_val,
-                'reason': reason
+                "svc_date": svc_date.strip(),
+                "cpt": cpt.strip(),
+                "line_charge_amt": charge_amt.strip(),
+                "line_payment_amt": payment_amt.strip(),
+                "total_adj_amt": total_adj_amt.strip(),
+                "remarks": remarks.strip(),
+                "adj_group": adj_group,
+                "adj_group_amt": adj_amt_val,
+                "reason": reason
             })
             records.append(record)
 
-    df_result = pd.DataFrame(records)
-    st.dataframe(df_result)
+    return pd.DataFrame(records)
 
-    # Download as Excel
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_result.to_excel(writer, index=False, sheet_name='Parsed Data')
-    output.seek(0)
+st.title("📄 Billing Text File Parser")
 
-    st.download_button(
-        label="Download Excel File",
-        data=output,
-        file_name="parsed_billing_data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+uploaded_file = st.file_uploader("Upload Billing Text File (.txt)", type=["txt"])
+
+if uploaded_file:
+    try:
+        text = uploaded_file.read().decode("utf-8").replace('\r\n', '\n')
+        df = parse_billing_text_file(text)
+
+        st.success(f"✅ Parsed {len(df)} service lines for {df['name'].nunique()} patient(s)")
+        st.dataframe(df)
+
+    except Exception as e:
+        st.error(f"❌ Error parsing file: {e}")
