@@ -1,13 +1,7 @@
-
 import streamlit as st
 import pandas as pd
 import re
 import io
-
-buffer = io.BytesIO()
-df.to_excel(buffer, index=False, engine='openpyxl')
-buffer.seek(0)
-
 
 st.title("Billing Text File Parser")
 
@@ -15,14 +9,14 @@ uploaded_file = st.file_uploader("Upload Billing Text File", type=["txt"])
 
 if uploaded_file is not None:
     text = uploaded_file.read().decode("utf-8")
-    entries = text.strip().split('\\n' + '-' * 100 + '\\n')
+    entries = text.strip().split('\n' + '-' * 100 + '\n')
     records = []
 
     for entry in entries:
         header_match = re.search(
-            r'(?P<check>\\d+)\\s+(?P<patient_id>\\S+)\\s+(?P<name>[A-Z]+,[A-Z]+)\\s+'
-            r'(?P<charge_amt>\\d+\\.\\d+)\\s+(?P<payment_amt>\\d+\\.\\d+)\\s+'
-            r'(?P<accnt>P\\d+)\\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)\\s+'
+            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[A-Z]+,[A-Z]+)\s+'
+            r'(?P<charge_amt>\d+\.\d+)\s+(?P<payment_amt>\d+\.\d+)\s+'
+            r'(?P<accnt>P\d+)\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)\s+'
             r'(?P<payer>NYSDOH)', entry
         )
         if not header_match:
@@ -31,8 +25,8 @@ if uploaded_file is not None:
 
         payer_address_match = re.search(
             r'(OFFICE OF HEALTH INSURANCE PROGRAM).*?(CORNING TOWER, EMPIRE STATE PLAZA).*?'
-            r'(ALBANY,NY \\d+).*?(Tax ID: \\S+)', entry, re.DOTALL)
-        payer_claim_number_match = re.search(r'Payer Claim Control Number: (\\d+)', entry)
+            r'(ALBANY,NY \d+).*?(Tax ID: \S+)', entry, re.DOTALL)
+        payer_claim_number_match = re.search(r'Payer Claim Control Number: (\d+)', entry)
         payer_details_parts = []
         if payer_address_match:
             payer_details_parts.extend(payer_address_match.groups())
@@ -41,7 +35,7 @@ if uploaded_file is not None:
         header_info['payer_details'] = " | ".join(payer_details_parts)
 
         claim_period_match = re.search(
-            r'Claim Statement Period:\\s+(\\d{2}/\\d{2}/\\d{4}) - (\\d{2}/\\d{2}/\\d{4})', entry
+            r'Claim Statement Period:\s+(\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})', entry
         )
         header_info['claim_start'] = claim_period_match.group(1) if claim_period_match else ''
         header_info['claim_end'] = claim_period_match.group(2) if claim_period_match else ''
@@ -49,7 +43,7 @@ if uploaded_file is not None:
         raw_lines = re.split(r'Line Item:', entry)[1:]
         for block in raw_lines:
             svc_match = re.search(
-                r'(\\d{2}/\\d{2}/\\d{4})\\s+(\\d{5})\\s+(\\d+\\.\\d+)\\s+(\\d+\\.\\d+)\\s+(\\d+\\.\\d+)\\s+(.*?)\\n',
+                r'(\d{2}/\d{2}/\d{4})\s+(\d{5})\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*?)\n',
                 block.strip()
             )
             if not svc_match:
@@ -65,7 +59,7 @@ if uploaded_file is not None:
                 for i, line in enumerate(adj_lines):
                     if "Adjustment Group" in line and i + 1 < len(adj_lines):
                         adj_values = adj_lines[i + 1].strip()
-                        adj_parts = re.split(r'\\s{2,}', adj_values)
+                        adj_parts = re.split(r'\s{2,}', adj_values)
                         if len(adj_parts) >= 3:
                             adj_group = adj_parts[0].strip()
                             adj_amt_val = adj_parts[1].strip()
@@ -89,12 +83,15 @@ if uploaded_file is not None:
     st.success("File parsed successfully.")
     st.dataframe(df)
 
+    # Create and return Excel from DataFrame
+    buffer = io.BytesIO()
+    df.to_excel(buffer, index=False, engine='openpyxl')
+    buffer.seek(0)
+
     st.download_button(
-    label="Download as Excel",
-    data=buffer,
-    file_name="Parsed_Billing_Output.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-
+        label="Download as Excel",
+        data=buffer,
+        file_name="Parsed_Billing_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
