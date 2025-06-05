@@ -99,9 +99,6 @@ if uploaded_file is not None:
         st.success(f"✅ Parsed {len(df)} rows.")
         st.dataframe(df)
 
-        st.write("📌 Unique Patients:")
-        st.write(df["name"].value_counts())
-
         # Download button
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
