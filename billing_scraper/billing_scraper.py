@@ -10,34 +10,22 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
         lines = entry.strip().splitlines()
         if lines and lines[0].strip().startswith("Check#"):
             lines = lines[1:]
-
-        if not lines:
-            continue
-
-        # Extract check number, patient ID, and name from first line
-        first_line = lines[0].strip()
-        check_match = re.match(
-            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[\w\'\-]+,[\w\'\-]+)',
-            first_line
-        )
-        if not check_match:
-            continue
-
-        header_info = check_match.groupdict()
-        header_info["payer"] = "NYSDOH"
-
-        # Recombine and flatten the full entry for other details
         entry = "\n".join(lines)
         entry_flat = re.sub(r'\s+', ' ', entry)
 
-        # Extract remaining header fields
-        accnt_match = re.search(r'(P\d+)', entry_flat)
-        status_match = re.search(r'(PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)', entry_flat)
+        header_match = re.search(
+            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[\w\'\-]+,[\w\'\-]+)\s+'
+            r'(?P<charge_amt>\d+\.\d+)\s+(?P<payment_amt>\d+\.\d+)\s+'
+            r'(?P<accnt>P\d+)\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)',
+            entry_flat,
+            re.IGNORECASE
+        )
+        if not header_match:
+            continue
 
-        header_info["accnt"] = accnt_match.group(1) if accnt_match else ''
-        header_info["status"] = status_match.group(1) if status_match else ''
+        header_info = header_match.groupdict()
+        header_info["payer"] = "NYSDOH"
 
-        # Payer details
         payer_details_parts = []
         payer_address_match = re.search(
             r'(OFFICE OF HEALTH INSURANCE PROGRAM).*?(CORNING TOWER, EMPIRE STATE PLAZA).*?'
@@ -51,24 +39,22 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
 
         header_info["payer_details"] = " | ".join(payer_details_parts)
 
-        # Claim statement period
         claim_period_match = re.search(
             r'Claim Statement Period:\s+(\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})', entry)
         header_info["claim_start"] = claim_period_match.group(1) if claim_period_match else ''
         header_info["claim_end"] = claim_period_match.group(2) if claim_period_match else ''
 
-        # Parse line items
         raw_lines = re.split(r'Line Item:', entry)[1:]
         for block in raw_lines:
             svc_match = re.search(
                 r'(\d{2}/\d{2}/\d{4})\s+(\d{5})\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*)',
                 block.strip())
+
             if not svc_match:
                 continue
 
             svc_date, cpt, charge_amt, payment_amt, total_adj_amt, remarks = svc_match.groups()
 
-            # Adjustments
             adj_group = ''
             adj_amt_val = ''
             reason = ''
@@ -99,17 +85,32 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
 
     return pd.DataFrame(records)
 
-st.title("📄 Billing Text File Parser")
+# ---------------- Streamlit UI ----------------
 
-uploaded_file = st.file_uploader("Upload Billing Text File (.txt)", type=["txt"])
+st.title("Billing Text File Parser")
 
-if uploaded_file:
+uploaded_file = st.file_uploader("Upload Billing Text File", type=["txt"])
+
+if uploaded_file is not None:
     try:
-        text = uploaded_file.read().decode("utf-8").replace('\r\n', '\n')
-        df = parse_billing_text_file(text)
+        raw_text = uploaded_file.read().decode("utf-8").replace('\r\n', '\n')
+        df = parse_billing_text_file(raw_text)
 
-        st.success(f"✅ Parsed {len(df)} service lines for {df['name'].nunique()} patient(s)")
+        st.success(f"✅ Parsed {len(df)} rows.")
         st.dataframe(df)
 
+        st.write("📌 Unique Patients:")
+        st.write(df["name"].value_counts())
+
+        # Download button
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name='parsed_billing_data.csv',
+            mime='text/csv'
+        )
+
     except Exception as e:
-        st.error(f"❌ Error parsing file: {e}")
+        st.error(f"❌ Failed to parse file: {e}")
+
