@@ -1,67 +1,71 @@
-import re
+import streamlit as st
 import pandas as pd
+import re
 from datetime import datetime
+import os
 
-# Input/output filenames
-input_file = "1.27-2.2.txt"
-output_file = "medicare_remits_output.xlsx"
+st.title("Medicare Remittance Parser")
 
-# Load full text
-with open(input_file, "r", encoding="utf-8") as f:
-    content = f.read()
+uploaded_file = st.file_uploader("Upload Remittance TXT File", type=["txt"])
 
-# Split by solid lines (if any)
-patients = re.split(r"_+\n", content.strip())
+if uploaded_file is not None:
+    content = uploaded_file.read().decode("utf-8")
+    base_filename = os.path.splitext(uploaded_file.name)[0]
 
-all_rows = []
+    # Split each patient section
+    patients = re.split(r"_+\n", content.strip())
+    all_rows = []
 
-for patient in patients:
-    # Extract header fields
-    name = re.search(r"NAME:(.+)", patient)
-    hic = re.search(r"HIC:(.+)", patient)
-    acnt = re.search(r"ACNT:(.+)", patient)
-    icn = re.search(r"ICN:(\S+)", patient)
+    for patient in patients:
+        name = re.search(r"NAME:(.+)", patient)
+        hic = re.search(r"HIC:(.+)", patient)
+        acnt = re.search(r"ACNT:(.+)", patient)
+        icn = re.search(r"ICN:(\S+)", patient)
 
-    name = name.group(1).strip() if name else ""
-    hic = hic.group(1).strip() if hic else ""
-    acnt = acnt.group(1).strip() if acnt else ""
-    icn = icn.group(1).strip() if icn else ""
+        name = name.group(1).strip() if name else ""
+        hic = hic.group(1).strip() if hic else ""
+        acnt = acnt.group(1).strip() if acnt else ""
+        icn = icn.group(1).strip() if icn else ""
 
-    # Match service blocks
-    service_lines = re.findall(
-        r"(\d{10})\s+\d{4}\s+(\d{6})\n"  # NPI and 6-digit date
-        r"(\d{5})\n"                    # billing code
-        r"([\d.]+)\n"                  # units
-        r"[\d.]+\n"                    # billed
-        r"[\d.]+\n"                    # allowed
-        r"[\d.]+\n"                    # deductible
-        r"[\d.]+\n"                    # coins
-        r"([\d.]+)",                   # paid
-        patient
-    )
+        service_lines = re.findall(
+            r"(\d{10})\s+\d{4}\s+(\d{6})\n"  # NPI, service date
+            r"(\d{5})\n"                    # billing code
+            r"([\d.]+)\n"                  # units
+            r"[\d.]+\n"                    # billed
+            r"[\d.]+\n"                    # allowed
+            r"[\d.]+\n"                    # deductible
+            r"[\d.]+\n"                    # coins
+            r"([\d.]+)",                   # paid
+            patient
+        )
 
-    for provider, yymmdd, code, units, paid in service_lines:
-        try:
-            month = yymmdd[:2]
-            day = yymmdd[2:4]
-            year = "20" + yymmdd[4:]
-            serv_date = datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").date()
-        except ValueError:
-            serv_date = ""
+        for provider, yymmdd, code, units, paid in service_lines:
+            try:
+                month = yymmdd[:2]
+                day = yymmdd[2:4]
+                year = "20" + yymmdd[4:]
+                serv_date = datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").date()
+            except ValueError:
+                serv_date = ""
 
-        all_rows.append({
-            "NAME": name,
-            "HIC": hic,
-            "ACNT": acnt,
-            "ICN": icn,
-            "RENDERING PROVIDER": provider,
-            "serv date": serv_date,
-            "billingcode": code,
-            "prov pd": float(paid),
-            "units": float(units)
-        })
+            all_rows.append({
+                "NAME": name,
+                "HIC": hic,
+                "ACNT": acnt,
+                "ICN": icn,
+                "RENDERING PROVIDER": provider,
+                "serv date": serv_date,
+                "billingcode": code,
+                "prov pd": float(paid),
+                "units": int(float(units))
+            })
 
-# Save to Excel
-df = pd.DataFrame(all_rows)
-df.to_excel(output_file, index=False)
-print(f"✅ Successfully saved to {output_file}")
+    # Create DataFrame and Excel output
+    df = pd.DataFrame(all_rows)
+    output_filename = f"{base_filename}.xlsx"
+    df.to_excel(output_filename, index=False)
+
+    st.success(f"✅ File processed successfully: {output_filename}")
+
+    with open(output_filename, "rb") as f:
+        st.download_button("📥 Download Excel File", f, file_name=output_filename)
