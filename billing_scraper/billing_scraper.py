@@ -2,26 +2,41 @@ import streamlit as st
 import pandas as pd
 import re
 
-def parse_billing_text_file(text: str) -> pd.DataFrame:
-    entries = re.split(r'\n-{50,}\n', text.strip())
+def parse_billing_text_file(text: str):
+    text = text.replace('\xa0', ' ')  # Normalize non-breaking spaces
+    entries = re.split(r'\n-{152,}\n', text)
+  # More flexible entry splitting
     records = []
+    skipped_entries = []
 
     for entry in entries:
-        lines = entry.strip().splitlines()
+        entry = entry.strip()
+        lines = entry.splitlines()
+        if not lines:
+            continue
+
+        lines = [line for line in lines if line.strip()]
         if lines and lines[0].strip().startswith("Check#"):
             lines = lines[1:]
+
         entry = "\n".join(lines)
         entry_flat = re.sub(r'\s+', ' ', entry)
 
         header_match = re.search(
-            r'(?P<check>\d+)\s+(?P<patient_id>\S+)\s+(?P<name>[\w\'\-]+,[\w\'\-]+)\s+'
-            r'(?P<charge_amt>\d+\.\d+)\s+(?P<payment_amt>\d+\.\d+)\s+'
-            r'(?P<accnt>P\d+)\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)',
-            entry_flat,
-            re.IGNORECASE
-        )
+    r'(?P<check>\d{10,20})\s+(?P<patient_id>\S+)\s+'
+    r'(?P<name>[A-Z\'\-]+,[A-Z\'\-]+(?:\s+[A-Z])?)\s+'
+    r'(?P<charge_amt>\d+\.\d+)\s+(?P<payment_amt>\d+\.\d+)\s+'
+    r'(?P<accnt>[A-Z0-9]+)\s+(?P<status>PROCESSED AS (?:PRIMARY|SECONDARY)|DENIED|REJECTED)'
+    r'(?:\s+(?P<payer>[A-Z]+))?',
+    entry_flat,
+    re.IGNORECASE
+)
+        
+        
         if not header_match:
+            skipped_entries.append(entry[:500])  # Save a snippet for review
             continue
+
 
         header_info = header_match.groupdict()
         header_info["payer"] = "NYSDOH"
@@ -44,11 +59,16 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
         header_info["claim_start"] = claim_period_match.group(1) if claim_period_match else ''
         header_info["claim_end"] = claim_period_match.group(2) if claim_period_match else ''
 
-        raw_lines = re.split(r'Line Item:', entry)[1:]
-        for block in raw_lines:
+        raw_lines = re.split(r'Line Item:', entry)
+        if len(raw_lines) <= 1:
+            continue
+
+        for block in raw_lines[1:]:
+            block = block.strip()
             svc_match = re.search(
-                r'(\d{2}/\d{2}/\d{4})\s+(\d{5})\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*)',
-                block.strip())
+                r'(\d{2}/\d{2}/\d{4})\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)?\s+(.*)',
+                block
+            )
 
             if not svc_match:
                 continue
@@ -75,7 +95,7 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
                 "cpt": cpt.strip(),
                 "line_charge_amt": charge_amt.strip(),
                 "line_payment_amt": payment_amt.strip(),
-                "total_adj_amt": total_adj_amt.strip(),
+                "total_adj_amt": (total_adj_amt or '').strip(),
                 "remarks": remarks.strip(),
                 "adj_group": adj_group,
                 "adj_group_amt": adj_amt_val,
@@ -83,7 +103,8 @@ def parse_billing_text_file(text: str) -> pd.DataFrame:
             })
             records.append(record)
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    return df, skipped_entries
 
 # ---------------- Streamlit UI ----------------
 
@@ -94,20 +115,23 @@ uploaded_file = st.file_uploader("Upload Billing Text File", type=["txt"])
 if uploaded_file is not None:
     try:
         raw_text = uploaded_file.read().decode("utf-8").replace('\r\n', '\n')
-        df = parse_billing_text_file(raw_text)
+        df, skipped = parse_billing_text_file(raw_text)
 
-        st.success(f"✅ Parsed {len(df)} rows.")
-        st.dataframe(df)
+        if df.empty:
+            st.warning("No valid records found.")
+        else:
+            st.success(f"✅ Parsed {len(df)} rows. ❗ Skipped {len(skipped)} entries.")
+            st.dataframe(df)
 
-        # Download button
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name='parsed_billing_data.csv',
-            mime='text/csv'
-        )
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download CSV", csv, "parsed_billing_data.csv", "text/csv")
+
+        if skipped:
+            with st.expander("⚠️ View Skipped Entries (Missing Headers)"):
+                for i, snippet in enumerate(skipped[:10]):
+                    st.code(snippet, language="text")
+                if len(skipped) > 10:
+                    st.write(f"... and {len(skipped) - 10} more entries were skipped.")
 
     except Exception as e:
         st.error(f"❌ Failed to parse file: {e}")
-
