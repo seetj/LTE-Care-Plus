@@ -14,8 +14,8 @@ def normalize_amount(s: str) -> str:
     return s
 
 # Non-capturing internals; avoids extra capture groups
-AMT_NEG = r'(?:-?\(?\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?\)?)'  # accepts negatives and parentheses
-AMT_POS = r'(?:\d+\.\d+)'                                  # original: positive decimals only
+AMT_NEG = r'(?:-?\(?\$?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?\)?)'
+AMT_POS = r'(?:\d+\.\d+)'                              
 
 # ---------- Compiled regexes (NEG first, then POS fallback) ----------
 
