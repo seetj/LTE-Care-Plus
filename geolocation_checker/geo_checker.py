@@ -2,6 +2,12 @@
 # - Simple reasons: "No user signature" / "No parent signature" (no format wording)
 # - Removed output columns: "User signature", "Parent signature"
 # - Removed "Geocode Debug" column
+# - FIXES:
+#   * Clean ZIPs (e.g., 11229.0 -> 11229)
+#   * Split unit parts (e.g., "2nd Floor") from primary street
+#   * De-duplicate query parts and avoid doubled addresses
+#   * Bias Mapbox geocoding toward addresses; disable autocomplete
+#   * Use cleaned/geocodable keys consistently
 
 import os
 import re
@@ -107,10 +113,54 @@ def clean_addr(addr: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+# --- NEW: ZIP cleaning & unit-aware address split ---
+ZIP_CLEAN_RE = re.compile(r"[^0-9-]")
+UNIT_TOKEN_RE = re.compile(r"\b(apt|apartment|unit|#|suite|ste|fl|floor|room|rm)\b", re.I)
+
+def clean_zip(z) -> str:
+    """Normalize ZIP-like values to ZIP5 or ZIP+4; handle floats from Excel (e.g., 11229.0)."""
+    if z is None or (isinstance(z, float) and math.isnan(z)):
+        return ""
+    s = str(z).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    s = ZIP_CLEAN_RE.sub("", s)
+    if re.fullmatch(r"\d{4}", s):
+        s = "0" + s  # left-pad legacy 4-digit to ZIP5
+    if re.fullmatch(r"\d{9}", s):
+        s = s[:5] + "-" + s[5:]
+    m = re.match(r"^(\d{5})(?:-(\d{4}))?$", s)
+    return f"{m.group(1)}-{m.group(2)}" if (m and m.group(2)) else (m.group(1) if m else "")
+
+def split_primary_unit(addr: str):
+    """
+    Return (primary_street, unit_part) so we can geocode primary first and append unit safely.
+    E.g., "1902 East 28th Street 2nd Floor" -> ("1902 East 28th Street", "2nd Floor")
+    """
+    s = clean_addr(addr)
+    if not s:
+        return "", ""
+    m = UNIT_TOKEN_RE.search(s)
+    if not m:
+        return s, ""
+    return s[:m.start()].rstrip(", "), s[m.start():].lstrip(", ").strip()
+
+def uniq_nonempty(parts):
+    """Dedup while preserving order; drop empty/None."""
+    seen = set()
+    out = []
+    for p in parts:
+        p = (p or "").strip().strip(",")
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
 def _mapbox_forward(q: str, token: str, timeout=5):
     """Low-level forward geocode; returns (lat, lon) or (None, None)."""
     url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{requests.utils.quote(q)}.json"
-    params = {"access_token": token, "limit": 1, "country": "US"}
+    params = {"access_token": token, "limit": 1, "country": "US", "types": "address", "autocomplete": "false"}
     try:
         r = requests.get(url, params=params, timeout=timeout)
         js = r.json()
@@ -128,7 +178,13 @@ def _mapbox_forward_detail(q: str, token: str, timeout=5):
     If not found, returns (None, None, {}).
     """
     url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{requests.utils.quote(q)}.json"
-    params = {"access_token": token, "limit": 1, "country": "US"}
+    params = {
+        "access_token": token,
+        "limit": 1,
+        "country": "US",
+        "types": "address",        # bias toward addresses
+        "autocomplete": "false",   # reduce fuzzy expansion
+    }
     try:
         r = requests.get(url, params=params, timeout=timeout)
         js = r.json()
@@ -163,14 +219,24 @@ def _mapbox_reverse(lat, lon, token: str, timeout=5):
         return ""
     return ""
 
+# --- REPLACED: smarter candidate builder (avoids duplicates; unit-aware; tries most-specific to least) ---
 def forward_candidates(addr, city, state, zip_):
-    # Minimal/strict: lead with the exact joined address; keep a few light fallbacks.
-    a = clean_addr(addr); c = (city or "").strip(); s = (state or "").strip(); z = (zip_ or "").strip()
-    return [
-        ", ".join([x for x in [a, c, s, z] if x]),
-        ", ".join([x for x in [a, c, s] if x]),
-        a,
+    primary, unit = split_primary_unit(addr)
+    city = (city or "").strip()
+    state = (state or "").strip().upper()[:2]
+    zip_ = clean_zip(zip_)
+
+    base = uniq_nonempty([primary, city, state, zip_])
+    with_unit = uniq_nonempty([f"{primary}, {unit}" if unit else primary, city, state, zip_])
+
+    candidates = [
+        ", ".join(with_unit),             # "1902 E 28th St, 2nd Fl, Brooklyn, NY 11229"
+        ", ".join(base),                  # "1902 E 28th St, Brooklyn, NY 11229"
+        ", ".join(base[:-1]),             # "1902 E 28th St, Brooklyn, NY"
+        f"{primary} {zip_}".strip(),      # "1902 E 28th St 11229"
+        primary,                          # "1902 E 28th St"
     ]
+    return uniq_nonempty(candidates)
 
 def robust_forward(addr, city, state, zip_, token, retries=1):
     """
@@ -211,6 +277,11 @@ if uploaded:
     work.rename(columns={"User": "BT"}, inplace=True)
     work.reset_index(drop=True, inplace=True)
 
+    # Normalize columns once to avoid noisy queries
+    work[COL_CLIENT_CITY] = work[COL_CLIENT_CITY].astype(str).str.strip()
+    work[COL_CLIENT_ZIP] = work[COL_CLIENT_ZIP].apply(clean_zip)
+    DEFAULT_STATE_CLEAN = (DEFAULT_STATE or "NY").strip().upper()[:2]
+
     st.info("Scanning rows and preparing unique geocode tasks…")
 
     # First pass: compute reasons + collect unique client geocodes needed
@@ -240,11 +311,12 @@ if uploaded:
 
         # Only geocode client if at least one coord parsed OK
         if (u_ll is not None) or (p_ll is not None):
+            primary_addr, _unit = split_primary_unit(row.get(COL_CLIENT_ADDR))
             key = (
-                str(row.get(COL_CLIENT_ADDR) or "").strip(),
+                primary_addr.strip(),
                 str(row.get(COL_CLIENT_CITY) or "").strip(),
-                str(DEFAULT_STATE or "").strip(),
-                str(row.get(COL_CLIENT_ZIP) or "").strip(),
+                DEFAULT_STATE_CLEAN,
+                clean_zip(row.get(COL_CLIENT_ZIP)),
             )
             need_client_keys.add(key)
 
@@ -315,8 +387,6 @@ if uploaded:
         r_list = [x for x in str(work.at[idx, "Reason"]).split(", ") if x] if work.at[idx, "Reason"] else []
         u_ll = user_coords[idx]
         p_ll = parent_coords[idx]
-        q_used = ""
-        f_meta = {}
 
         # If both coords absent, skip distance
         if (u_ll is None) and (p_ll is None):
@@ -324,11 +394,12 @@ if uploaded:
             continue
 
         # Fetch client lat/lon from cache (if we created the key earlier)
+        primary_addr, _unit = split_primary_unit(row.get(COL_CLIENT_ADDR))
         key = (
-            str(row.get(COL_CLIENT_ADDR) or "").strip(),
+            primary_addr.strip(),
             str(row.get(COL_CLIENT_CITY) or "").strip(),
-            str(DEFAULT_STATE or "").strip(),
-            str(row.get(COL_CLIENT_ZIP) or "").strip(),
+            DEFAULT_STATE_CLEAN,
+            clean_zip(row.get(COL_CLIENT_ZIP)),
         )
         client_ll, debug_note, q_used, f_meta = fwd_cache.get(key, (None, "NO_GEOCODE", "", {}))
 
