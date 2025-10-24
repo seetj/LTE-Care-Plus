@@ -13,6 +13,10 @@ import streamlit as st
 st.set_page_config(page_title="AlohaABA — Match + Duration + Geolocation", layout="wide")
 st.title("AlohaABA — Match + Duration + Geolocation (No Aggregation)")
 
+# Initialize UI state keys once (for toggles/buttons)
+if "show_all_data" not in st.session_state:
+    st.session_state["show_all_data"] = False
+
 # ------------- Fixed config (no user choices) -------------
 MAPBOX_TOKEN = (
     os.getenv("MAPBOX_ACCESS_TOKEN")
@@ -36,9 +40,9 @@ SESS_REQUIRED_COLS = [
 ]
 
 # Billing required columns (predefined)
-BILL_REQUIRED_COLS = ["Staff Name", "Client Name","Appt. Date", "Billing Hours"]
+BILL_REQUIRED_COLS = ["Staff Name", "Client Name", "Appt. Date", "Billing Hours", "Completed"]
 
-# Output columns
+# Output columns (detailed view)
 END_OUTPUT_COLS = [
     "Client", "BT", "Date/Time", "End time", "Duration", "Session", "Status",
     COL_CLIENT_ADDR, COL_CLIENT_CITY, COL_CLIENT_ZIP,
@@ -46,10 +50,19 @@ END_OUTPUT_COLS = [
     "User signature location", "User signature address",
     "Parent signature location", "Parent signature address",
     "Billing matched staff", "Billing matched client", "Billing date",
-    "Billing hours (min)", "Session duration (min)", "Duration diff (min)", "Duration OK?",
+    "Billing hours (min)", "Billing Completed",
+    "Session duration (min)", "Duration diff (min)", "Duration OK?",
     "Matched staff score", "Matched client score",
     "Geo OK?", "Issue Type",
     "Reason",
+]
+
+# Simplified columns for Flagged/Clean exports
+FINAL_COLS = [
+    "BT", "Client", "Date/Time",
+    "Session duration (min)", "Billing hours (min)",
+    "Billing Completed",
+    "Issue Type", "Reason"
 ]
 
 # =============== Helpers ===============
@@ -168,19 +181,16 @@ def detect_bill_units(series) -> str:
     - If any value > 12 and no value with ':' -> assume Minutes
     - Else assume Decimal hours
     """
-    s = pd.to_numeric(pd.to_datetime(series, errors="coerce"), errors="coerce")  # bait datetime to NaT; then numeric
-    # If dates got converted, treat separately
     as_str = series.astype(str)
     if (as_str.str.contains(":").any()):
-        # someone accidentally put HH:MM — treat as minutes via parse_hhmm_to_minutes
         return "HHMM"
-    vals = pd.to_numeric(series.astype(str).str.strip().str.replace(",", ""), errors="coerce")
+    vals = pd.to_numeric(as_str.str.strip().str.replace(",", ""), errors="coerce")
     if (vals > 12).any():
         return "MIN"
     return "HRS"
 
 def to_minutes_session(val) -> float:
-    # Sessions Duration assumed HH:MM or HH:MM:SS (your exports)
+    # Sessions Duration assumed HH:MM or HH:MM:SS
     return parse_hhmm_to_minutes(val)
 
 def to_minutes_billing(val, detected: str) -> float:
@@ -259,12 +269,12 @@ def robust_forward(addr, city, state, zip_, token, retries=1):
 # =============== Uploads ===============
 left, right = st.columns(2)
 with left:
-    sess_file = st.file_uploader("Upload Sessions file (CSV/XLSX)", type=["csv", "xlsx", "xls"])
+    sess_file = st.file_uploader("上传会话文件 (Upload Sessions file - CSV/XLSX)", type=["csv", "xlsx", "xls"])
 with right:
-    bill_file = st.file_uploader("Upload Billing file (CSV/XLSX)", type=["csv", "xlsx", "xls"])
+    bill_file = st.file_uploader("上传账单文件 (Upload Billing file - CSV/XLSX)", type=["csv", "xlsx", "xls"])
 
 if not sess_file:
-    st.info("Upload a Sessions file to begin.")
+    st.info("请先上传会话文件 (Upload a Sessions file to begin).")
     st.stop()
 
 # =============== Sessions load & filter ===============
@@ -274,7 +284,7 @@ if missing_s:
     st.error(f"Sessions: missing columns {missing_s}")
     st.stop()
 
-st.caption("Preview: Sessions (first 20 rows)")
+st.caption("预览：会话 (Sessions) — 前20行 (first 20 rows)")
 st.dataframe(sessions.head(20), use_container_width=True)
 
 # Filter to required session + status
@@ -284,7 +294,7 @@ work = sessions[
 ].copy()
 
 if work.empty:
-    st.warning("No rows meet the filters: Session='1:1 BT Direct Service' AND Status='Transferred to AlohaABA'.")
+    st.warning("没有符合条件的行：Session='1:1 BT Direct Service' 且 Status='Transferred to AlohaABA'。")
     st.stop()
 
 work.rename(columns={"User": "BT"}, inplace=True)
@@ -306,6 +316,7 @@ work["Billing matched staff"] = ""
 work["Billing matched client"] = ""
 work["Billing date"] = ""
 work["Billing hours (min)"] = None
+work["Billing Completed"] = ""
 work["Matched staff score"] = None
 work["Matched client score"] = None
 
@@ -329,8 +340,12 @@ for _, row in work.iterrows():
 work["Reason"] = pre_reasons
 
 # =============== Matching + Duration (no aggregation) ===============
+def _is_completed(v) -> bool:
+    s = str(v).strip().lower()
+    return s in {"yes", "y", "true", "1", "completed", "done"}
+
 if not bill_file:
-    st.warning("Upload a Billing file to run matching and duration checks.")
+    st.warning("上传账单文件以运行匹配与时长校验 (Upload a Billing file to run matching and duration checks).")
 else:
     billing = read_any(bill_file)
     missing_b = [c for c in BILL_REQUIRED_COLS if c not in billing.columns]
@@ -338,13 +353,14 @@ else:
         st.error(f"Billing: missing columns {missing_b}")
         st.stop()
 
-    st.caption("Preview: Billing (first 20 rows)")
+    st.caption("预览：账单 (Billing) — 前20行 (first 20 rows)")
     st.dataframe(billing.head(20), use_container_width=True)
 
     bill = billing.copy()
     bill["_bill_date"] = pd.to_datetime(bill["Appt. Date"], errors="coerce").dt.date
     bill["_norm_staff"] = bill["Staff Name"].astype(str).map(norm_name)
     bill["_norm_client"] = bill["Client Name"].astype(str).map(norm_name)
+    bill["_completed"] = bill["Completed"].apply(_is_completed)
     # auto-detect units for Billing Hours
     detected_units = detect_bill_units(bill["Billing Hours"])
     bill["_bill_minutes"] = bill["Billing Hours"].apply(lambda v: to_minutes_billing(v, detected_units))
@@ -371,7 +387,12 @@ else:
         cand["_staff_score"]  = cand["Staff Name"].apply(lambda v: name_similarity(s_staff_raw, v))
         cand["_client_score"] = cand["Client Name"].apply(lambda v: name_similarity(s_client_raw, v))
 
-        best = cand.sort_values(by=["_used","_staff_score","_client_score"], ascending=[True, False, False]).head(1)
+        # prefer: unused -> completed -> higher staff score -> higher client score
+        best = cand.sort_values(
+            by=["_used", "_completed", "_staff_score", "_client_score"],
+            ascending=[True, False, False, False]
+        ).head(1)
+
         if best.empty:
             work.at[idx, "Reason"] = (row["Reason"] + ", No billing line match (date+staff+client)").strip(", ")
             work.at[idx, "Duration OK?"] = False
@@ -400,6 +421,12 @@ else:
         work.at[idx, "Matched staff score"] = round(staff_score, 3)
         work.at[idx, "Matched client score"] = round(client_score, 3)
 
+        # Completed flag requirement
+        is_completed = bool(best["_completed"].iloc[0])
+        work.at[idx, "Billing Completed"] = "Yes" if is_completed else "No"
+        if not is_completed:
+            work.at[idx, "Reason"] = (row["Reason"] + ", Billing not completed").strip(", ")
+
         s_minutes = float(work.at[idx, "Session duration (min)"]) if pd.notna(work.at[idx, "Session duration (min)"]) else None
         if s_minutes is None or b_minutes is None:
             work.at[idx, "Reason"] = (row["Reason"] + ", Missing duration/billing minutes").strip(", ")
@@ -415,13 +442,13 @@ else:
 
 # =============== Geolocation (always runs, independent of duration) ===============
 st.divider()
-st.subheader("Geolocation pass")
+st.subheader("地理位置校验 (Geolocation pass)")
 if not MAPBOX_TOKEN:
-    st.warning("No Mapbox token detected in environment or secrets (MAPBOX_ACCESS_TOKEN). Geocoding will be skipped.")
+    st.warning("未检测到 Mapbox token（MAPBOX_ACCESS_TOKEN）。将跳过地理编码。")
 
 need_client_keys = set()
-for _, row in work.iterrows():
-    u_ll = user_coords[_]; p_ll = parent_coords[_]
+for i, row in work.iterrows():
+    u_ll = user_coords[i]; p_ll = parent_coords[i]
     if (u_ll is not None) or (p_ll is not None):
         primary_addr, _unit = split_primary_unit(row.get(COL_CLIENT_ADDR))
         key = (
@@ -512,6 +539,7 @@ for idx in rows_to_reverse:
 def issue_type(row):
     d = row.get("Duration OK?")
     g = row.get("Geo OK?")
+    # Note: Billing Completed adds a "Reason"; that automatically pushes row into flagged bucket.
     if d is False and g is False: return "Both"
     if d is False: return "Duration"
     if g is False: return "Geolocation"
@@ -521,37 +549,60 @@ work["Issue Type"] = work.apply(issue_type, axis=1)
 flagged = work[work["Reason"].astype(str).str.strip() != ""].copy()
 clean = work[work["Reason"].astype(str).str.strip() == ""].copy()
 
-tabs = st.tabs(["Overview", "Flagged (needs attention)", "Clean (no issues)", "Debug"])
+tabs = st.tabs(["概览 (Overview)", "需要关注 (Flagged)", "无问题 (Clean)", "调试 (Debug)"])
+
 with tabs[0]:
-    st.metric("Total filtered sessions", len(work))
-    st.metric("Flagged", len(flagged))
-    st.metric("Clean", len(clean))
+    st.metric("已筛选的会话总数 (Total filtered sessions)", len(work))
+    st.metric("存在问题 (Flagged)", len(flagged))
+    st.metric("无问题 (Clean)", len(clean))
+
+    # Toggle to show all detailed data (full columns)
+    if st.button("📊 查看全部详细数据 (Show All Detailed Data)"):
+        st.session_state["show_all_data"] = not st.session_state["show_all_data"]
+
+    if st.session_state["show_all_data"]:
+        st.subheader("🔍 全部数据 (All Data — Detailed View)")
+        st.markdown("包含所有行（存在问题与无问题），使用完整列。")
+        out_cols_all = [c for c in END_OUTPUT_COLS if c in work.columns]
+        st.dataframe(work[out_cols_all], use_container_width=True)
+        st.download_button(
+            "⬇️ 下载所有详细数据 (Download All Detailed CSV)",
+            data=work[out_cols_all].to_csv(index=False).encode("utf-8"),
+            file_name="all_detailed_combined_checks.csv",
+            mime="text/csv",
+        )
 
 with tabs[1]:
-    out_cols = [c for c in END_OUTPUT_COLS if c in flagged.columns]
-    st.dataframe(flagged[out_cols], use_container_width=True)
+    st.subheader("⚠️ 存在问题的行 (Flagged Rows)")
+    out_cols_flagged = [c for c in FINAL_COLS if c in flagged.columns]
+    st.dataframe(flagged[out_cols_flagged], use_container_width=True)
     st.download_button(
-        "⬇️ Download FLAGGED rows (CSV)",
-        data=flagged[out_cols].to_csv(index=False).encode("utf-8"),
+        "⬇️ 下载存在问题的行 (Download Flagged CSV)",
+        data=flagged[out_cols_flagged].to_csv(index=False).encode("utf-8"),
         file_name="flagged_combined_checks.csv",
         mime="text/csv",
     )
 
 with tabs[2]:
-    out_cols_c = [c for c in END_OUTPUT_COLS if c in clean.columns]
-    st.dataframe(clean[out_cols_c], use_container_width=True)
+    st.subheader("✅ 无问题的行 (Clean Rows)")
+    out_cols_clean = [c for c in FINAL_COLS if c in clean.columns]
+    st.dataframe(clean[out_cols_clean], use_container_width=True)
     st.download_button(
-        "⬇️ Download CLEAN rows (CSV)",
-        data=clean[out_cols_c].to_csv(index=False).encode("utf-8"),
+        "⬇️ 下载无问题的行 (Download Clean CSV)",
+        data=clean[out_cols_clean].to_csv(index=False).encode("utf-8"),
         file_name="clean_combined_checks.csv",
         mime="text/csv",
     )
 
 with tabs[3]:
     # compact debug: show a small sample, plus unmatched billing lines (if billing uploaded)
-    st.write("**Sample of working dataframe (first 50 rows)**")
-    st.dataframe(work.head(50), use_container_width=True)
+    st.write("**样本数据 (Sample of working dataframe, 前50行)**")
+    sample_cols = [c for c in END_OUTPUT_COLS if c in work.columns]
+    st.dataframe(work[sample_cols].head(50), use_container_width=True)
     if bill_file:
         unused = bill[~bill["_used"]].copy()
-        st.write("**Unused Billing Lines**")
-        st.dataframe(unused[["Staff Name", "Client Name", "Appt. Date", "Billing Hours"]], use_container_width=True)
+        st.write("**未匹配的账单行 (Unused Billing Lines)**")
+        st.dataframe(
+            unused[["Staff Name", "Client Name", "Appt. Date", "Billing Hours", "Completed"]],
+            use_container_width=True,
+        )
