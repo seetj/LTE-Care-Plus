@@ -462,9 +462,9 @@ def geocode_patient_address(addr: str, city: str, token: str):
 # =========================
 c1, c2 = st.columns(2)
 with c1:
-    sess_file = st.file_uploader("Upload Sessions (CSV/XLSX)", type=["csv","xlsx","xls"])
+    sess_file = st.file_uploader("Upload Hirasmus (CSV/XLSX)", type=["csv","xlsx","xls"])
 with c2:
-    bill_file = st.file_uploader("Upload Billing (CSV/XLSX)", type=["csv","xlsx","xls"])
+    bill_file = st.file_uploader("Upload Aloha (CSV/XLSX)", type=["csv","xlsx","xls"])
 
 if not sess_file or not bill_file:
     st.info("Upload both files to begin."); st.stop()
@@ -737,9 +737,9 @@ for di, d in enumerate(dates, 1):
 
             # Human-friendly duration verdict
             if under_flag and not over_flag:
-                duration_verdict = f"HiRasmus session under-billed by {int(round(-diff))} min"
+                duration_verdict = f"HiRasmus duration over aloha duration by {int(round(-diff))} min"
             elif over_flag and not under_flag:
-                duration_verdict = f"HiRasmus session over-billed by {int(round(diff))} min"
+                duration_verdict = f"HiRasmus duration under aloha duration by {int(round(diff))} min"
             elif over_flag and under_flag:
                 duration_verdict = "⚠️ Data conflict: check durations / duplicate match"
             else:
